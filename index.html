@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+   <head>
+     <meta charset="UTF-8" />
+     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+     <title>XTrans - 局域网文件传输</title>
+     <meta name="description" content="快速、安全的局域网文件传输工具" />
+     <meta name="theme-color" content="#3b82f6" />
+     <meta name="apple-mobile-web-app-capable" content="yes" />
+     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+     <meta name="apple-mobile-web-app-title" content="XTrans" />
+     <link rel="manifest" href="/manifest.json" />
+     <link rel="apple-touch-icon" href="/icon-192x192.png" />
+   </head>
+   <body>
+     <div id="root"></div>
+     <script type="module" src="/src/main.tsx"></script>
+     <script>
+       if ('serviceWorker' in navigator) {
+         window.addEventListener('load', () => {
+           navigator.serviceWorker.register('/sw.js')
+             .then((registration) => {
+               console.log('Service Worker registered:', registration);
+             })
+             .catch((error) => {
+               console.log('Service Worker registration failed:', error);
+             });
+         });
+       }
+     </script>
+   </body>
+ </html>

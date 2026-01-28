@@ -28,5 +28,5 @@ export default defineConfig({
       },
     },
   },
-  base: '/xtrans-s/',  // 替换为你的仓库名
+  base: '/',
 });

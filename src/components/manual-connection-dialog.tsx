@@ -7,8 +7,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { QRCodeSVG } from "qrcode.react";
 import { Copy, Check, ScanLine, ArrowRight, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import LZString from "lz-string";
 import { HybridConnectionManager } from "../lib/hybrid-connection-manager";
+import { sdpCompressor } from "../lib/sdp-compressor";
 
 interface ManualConnectionDialogProps {
   open: boolean;
@@ -106,54 +106,16 @@ export function ManualConnectionDialog({
     }
   };
 
-  // 编码/解码辅助函数 (使用 Base64)
-  const encode = (data: string) => {
-    try {
-      // 处理 Unicode 字符
-      const bytes = new TextEncoder().encode(data);
-      const binString = Array.from(bytes, (byte) => String.fromCodePoint(byte)).join("");
-      return "XTRANS:" + btoa(binString);
-    } catch (e) {
-      console.error("编码失败", e);
-      return "";
-    }
-  };
-
-  const decode = (data: string) => {
-    try {
-      if (!data.startsWith("XTRANS:")) {
-        // 尝试兼容旧格式或纯 JSON
-        if (data.trim().startsWith("{")) return data.trim();
-        // 尝试直接 Base64 解码（不带前缀）
-        try {
-           const binString = atob(data);
-           const bytes = Uint8Array.from(binString, (m) => m.codePointAt(0)!);
-           return new TextDecoder().decode(bytes);
-        } catch {
-           return null;
-        }
-      }
-
-      const base64 = data.slice(7); // 去掉前缀
-      const binString = atob(base64);
-      const bytes = Uint8Array.from(binString, (m) => m.codePointAt(0)!);
-      return new TextDecoder().decode(bytes);
-    } catch (e) {
-      console.error("解码失败", e);
-      return null;
-    }
-  };
-
-  // 发起方：生成连接码 (Offer)
+  // 发起方：生成连接码 (Offer) - 已简化，使用压缩版本
   const handleGenerateOffer = async () => {
     if (!connectionManager) return;
     setIsLoading(true);
     try {
       // 创建一个临时的目标ID，实际连接建立后会更新
       const tempTargetId = "manual-target-" + Date.now();
-      const offerSdp = await connectionManager.createManualConnection(tempTargetId);
-      const encoded = encode(offerSdp);
-      setOfferCode(encoded);
+      // createManualConnection 现在直接返回压缩后的连接码
+      const offerCode = await connectionManager.createManualConnection(tempTargetId);
+      setOfferCode(offerCode);
       setStep(2);
     } catch (error) {
       console.error(error);
@@ -163,55 +125,48 @@ export function ManualConnectionDialog({
     }
   };
 
-  // 发起方：完成连接 (处理 Answer)
+  // 发起方：完成连接 (处理 Answer) - 已简化，直接传递连接码
   const handleFinalizeConnection = async () => {
     if (!connectionManager || !inputCode) return;
     setIsLoading(true);
     try {
       const cleanCode = inputCode.trim();
-      let answerSdp = decode(cleanCode);
 
-      if (!answerSdp) {
-        throw new Error("无法解码连接码");
+      // 验证连接码格式
+      if (!cleanCode) {
+        throw new Error("连接码不能为空");
       }
 
-      try {
-        JSON.parse(answerSdp);
-      } catch (e) {
-        throw new Error("无效的连接码格式（无法解析为 JSON）");
-      }
-
-      // ... (后续逻辑需要调整，因为我们之前修改了 handleFinalizeConnection)
+      // 直接传递连接码，connectionManager 会自动解压
+      await connectionManager.finalizeManualConnection(tempConnectionId, cleanCode);
+      toast.success("连接成功！");
+      onOpenChange(false);
     } catch (error) {
-      // ...
+      console.error(error);
+      toast.error(`连接失败: ${error instanceof Error ? error.message : "未知错误"}`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
 
-  // 接收方：处理 Offer 并生成 Answer
+  // 接收方：处理 Offer 并生成 Answer - 已简化，直接传递连接码
   const handleProcessOffer = async () => {
     if (!connectionManager || !inputCode) return;
     setIsLoading(true);
     try {
       const cleanCode = inputCode.trim();
-      let offerSdp = decode(cleanCode);
 
-      if (!offerSdp) {
-        throw new Error("无法解码连接码");
-      }
-
-      // 验证是否为有效的 JSON
-      try {
-        JSON.parse(offerSdp);
-      } catch (e) {
-        throw new Error("无效的连接码格式（无法解析为 JSON）");
+      // 验证连接码格式
+      if (!cleanCode) {
+        throw new Error("连接码不能为空");
       }
 
       // 接收方生成一个临时 ID 给发起方
       const tempInitiatorId = "manual-initiator-" + Date.now();
-      const answerSdp = await connectionManager.acceptManualConnection(tempInitiatorId, offerSdp);
-      const encoded = encode(answerSdp);
-      setAnswerCode(encoded);
+      // acceptManualConnection 会自动解压 offer 并返回压缩的 answer
+      const answerCode = await connectionManager.acceptManualConnection(tempInitiatorId, cleanCode);
+      setAnswerCode(answerCode);
       setStep(2);
     } catch (error) {
       console.error("处理连接码错误:", error);
@@ -224,17 +179,23 @@ export function ManualConnectionDialog({
   // 状态保存临时 ID
   const [tempConnectionId, setTempConnectionId] = useState<string>("");
 
-  // 修正后的发起方生成 Offer
+  // 发起方生成 Offer（使用压缩版本）
   const generateOffer = async () => {
     if (!connectionManager) return;
     setIsLoading(true);
     try {
       const id = "manual-peer-" + Math.random().toString(36).substring(2, 9);
       setTempConnectionId(id);
-      const offerSdp = await connectionManager.createManualConnection(id);
-      const encoded = encode(offerSdp);
-      setOfferCode(encoded);
+      // createManualConnection 现在直接返回压缩后的连接码
+      const offerCode = await connectionManager.createManualConnection(id);
+      setOfferCode(offerCode);
       setStep(2);
+
+      // 可选：显示压缩效果
+      const isCompressed = sdpCompressor.isCompressed(offerCode);
+      if (isCompressed) {
+        console.log('✨ 使用了压缩连接码');
+      }
     } catch (error) {
       console.error(error);
       toast.error(`生成连接码失败: ${error instanceof Error ? error.message : "未知错误"}`);
@@ -243,25 +204,20 @@ export function ManualConnectionDialog({
     }
   };
 
-  // 修正后的发起方完成连接
+  // 发起方完成连接（使用压缩版本）
   const finalizeConnection = async () => {
     if (!connectionManager || !inputCode || !tempConnectionId) return;
     setIsLoading(true);
     try {
       const cleanCode = inputCode.trim();
-      let answerSdp = decode(cleanCode);
 
-      if (!answerSdp) {
-        throw new Error("无法解码连接码");
+      // 验证连接码格式
+      if (!cleanCode) {
+        throw new Error("连接码不能为空");
       }
 
-      try {
-        JSON.parse(answerSdp);
-      } catch (e) {
-        throw new Error("无效的连接码格式（无法解析为 JSON）");
-      }
-
-      await connectionManager.finalizeManualConnection(tempConnectionId, answerSdp);
+      // 直接传递连接码，connectionManager 会自动解压
+      await connectionManager.finalizeManualConnection(tempConnectionId, cleanCode);
       toast.success("连接成功！");
       onOpenChange(false);
     } catch (error) {

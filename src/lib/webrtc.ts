@@ -1,3 +1,5 @@
+import { sdpCompressor } from './sdp-compressor';
+
 // WebRTC 配置
 export const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
@@ -378,6 +380,40 @@ export class P2PConnection {
 
     const answerDesc = JSON.parse(answerSdp);
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answerDesc));
+  }
+
+  // 创建压缩的离线 Offer（新方法）
+  async createCompressedOffer(): Promise<string> {
+    // 获取原始 SDP
+    const sdp = await this.createOfflineOffer();
+    // 压缩并返回
+    return sdpCompressor.compress(sdp);
+  }
+
+  // 创建压缩的离线 Answer（新方法）
+  async createCompressedAnswer(offerSdp: string): Promise<string> {
+    // 解压 offer
+    const decompressedOffer = sdpCompressor.decompress(offerSdp);
+    if (!decompressedOffer) {
+      throw new Error('无法解压 Offer Code');
+    }
+
+    // 使用解压后的 offer 创建 answer
+    const sdp = await this.createOfflineAnswer(decompressedOffer);
+    // 压缩并返回
+    return sdpCompressor.compress(sdp);
+  }
+
+  // 处理压缩的 Answer（新方法）
+  async handleCompressedAnswer(answerSdp: string): Promise<void> {
+    // 解压 answer
+    const decompressedAnswer = sdpCompressor.decompress(answerSdp);
+    if (!decompressedAnswer) {
+      throw new Error('无法解压 Answer Code');
+    }
+
+    // 使用解压后的 answer 设置远程描述
+    await this.handleOfflineAnswer(decompressedAnswer);
   }
 
   // 等待 ICE 收集完成

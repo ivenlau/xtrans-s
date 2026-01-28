@@ -133,8 +133,8 @@ export class HybridConnectionManager {
       }
     });
 
-    // 创建离线 Offer
-    return await connection.createOfflineOffer();
+    // 创建压缩的离线 Offer
+    return await connection.createCompressedOffer();
   }
 
   // 接受手动连接 Offer
@@ -178,8 +178,8 @@ export class HybridConnectionManager {
       }
     });
 
-    // 创建离线 Answer
-    return await connection.createOfflineAnswer(offerSdp);
+    // 创建压缩的离线 Answer
+    return await connection.createCompressedAnswer(offerSdp);
   }
 
   // 完成手动连接 (发起方接收 Answer)
@@ -189,7 +189,8 @@ export class HybridConnectionManager {
       throw new Error('Connection not found or invalid type');
     }
 
-    await connection.handleOfflineAnswer(answerSdp);
+    // 使用压缩版本处理 Answer
+    await connection.handleCompressedAnswer(answerSdp);
   }
 
   async connectToDevice(deviceId: string, deviceInfo: DeviceInfo): Promise<boolean> {

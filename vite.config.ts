@@ -28,5 +28,5 @@ export default defineConfig({
       },
     },
   },
-  base: '/',
+  base: '/xtrans-s/',
 });

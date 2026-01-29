@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
+import { useClipboardMonitor } from "../hooks/use-clipboard-monitor";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { QRCodeSVG } from "qrcode.react";
-import { Copy, Check, ScanLine, ArrowRight, Loader2 } from "lucide-react";
+import { Copy, Check, ScanLine, ArrowRight, Loader2, Circle, CircleCheck } from "lucide-react";
 import { toast } from "sonner";
 import { HybridConnectionManager } from "../lib/hybrid-connection-manager";
 import { sdpCompressor } from "../lib/sdp-compressor";
@@ -28,6 +29,26 @@ export function ManualConnectionDialog({
   const [inputCode, setInputCode] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<string>("");
+
+  // 剪贴板监听 - 自动识别连接码
+  const { setEnabled: setClipboardMonitorEnabled } = useClipboardMonitor({
+    onDetect: (code) => {
+      setInputCode(code);
+      toast.success("已识别剪贴板中的连接码");
+      setConnectionStatus("已自动填充连接码");
+    },
+    validator: (text) => {
+      const trimmed = text.trim();
+      // 验证是否是有效的连接码格式
+      return (
+        trimmed.startsWith("X1:") ||
+        trimmed.startsWith("XTRANS:") ||
+        trimmed.length > 100 // 简单验证：连接码通常很长
+      );
+    },
+    interval: 3000, // 每3秒检查一次
+  });
 
   // 重置状态
   useEffect(() => {
@@ -37,8 +58,18 @@ export function ManualConnectionDialog({
       setAnswerCode("");
       setInputCode("");
       setIsLoading(false);
+      setConnectionStatus("");
+      // 关闭对话框时禁用剪贴板监听
+      return () => {
+        setClipboardMonitorEnabled(false);
+      };
     }
-  }, [open]);
+  }, [open, setClipboardMonitorEnabled]);
+
+  // 当输入框获得焦点时，启用剪贴板监听
+  const handleInputFocus = () => {
+    setClipboardMonitorEnabled(true);
+  };
 
   // 监听连接成功事件
   useEffect(() => {
@@ -154,6 +185,7 @@ export function ManualConnectionDialog({
   const handleProcessOffer = async () => {
     if (!connectionManager || !inputCode) return;
     setIsLoading(true);
+    setConnectionStatus("正在处理连接码...");
     try {
       const cleanCode = inputCode.trim();
 
@@ -162,14 +194,17 @@ export function ManualConnectionDialog({
         throw new Error("连接码不能为空");
       }
 
+      setConnectionStatus("正在生成响应码...");
       // 接收方生成一个临时 ID 给发起方
       const tempInitiatorId = "manual-initiator-" + Date.now();
       // acceptManualConnection 会自动解压 offer 并返回压缩的 answer
       const answerCode = await connectionManager.acceptManualConnection(tempInitiatorId, cleanCode);
       setAnswerCode(answerCode);
       setStep(2);
+      setConnectionStatus("响应码已生成，请发送回发起方");
     } catch (error) {
       console.error("处理连接码错误:", error);
+      setConnectionStatus("处理连接码失败");
       toast.error(`处理连接码失败: ${error instanceof Error ? error.message : "未知错误"}`);
     } finally {
       setIsLoading(false);
@@ -183,6 +218,7 @@ export function ManualConnectionDialog({
   const generateOffer = async () => {
     if (!connectionManager) return;
     setIsLoading(true);
+    setConnectionStatus("正在生成连接码...");
     try {
       const id = "manual-peer-" + Math.random().toString(36).substring(2, 9);
       setTempConnectionId(id);
@@ -190,6 +226,7 @@ export function ManualConnectionDialog({
       const offerCode = await connectionManager.createManualConnection(id);
       setOfferCode(offerCode);
       setStep(2);
+      setConnectionStatus("连接码已生成，请发送给对方");
 
       // 可选：显示压缩效果
       const isCompressed = sdpCompressor.isCompressed(offerCode);
@@ -198,6 +235,7 @@ export function ManualConnectionDialog({
       }
     } catch (error) {
       console.error(error);
+      setConnectionStatus("生成连接码失败");
       toast.error(`生成连接码失败: ${error instanceof Error ? error.message : "未知错误"}`);
     } finally {
       setIsLoading(false);
@@ -208,6 +246,7 @@ export function ManualConnectionDialog({
   const finalizeConnection = async () => {
     if (!connectionManager || !inputCode || !tempConnectionId) return;
     setIsLoading(true);
+    setConnectionStatus("正在建立P2P连接...");
     try {
       const cleanCode = inputCode.trim();
 
@@ -216,17 +255,41 @@ export function ManualConnectionDialog({
         throw new Error("连接码不能为空");
       }
 
+      setConnectionStatus("正在交换SDP信息...");
       // 直接传递连接码，connectionManager 会自动解压
       await connectionManager.finalizeManualConnection(tempConnectionId, cleanCode);
+      setConnectionStatus("连接建立成功！");
       toast.success("连接成功！");
       onOpenChange(false);
     } catch (error) {
       console.error(error);
+      setConnectionStatus("连接失败，请检查连接码是否正确");
       toast.error(`连接失败: ${error instanceof Error ? error.message : "未知错误"}`);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // 获取步骤指示器
+  const getSteps = () => {
+    if (activeTab === "sender") {
+      return [
+        { title: "生成连接码", status: step >= 1 ? "completed" : "pending" },
+        { title: "发送给对方", status: step >= 2 ? "active" : "pending" },
+        { title: "输入响应码", status: step >= 2 && inputCode ? "completed" : "pending" },
+        { title: "建立连接", status: step >= 2 && inputCode ? "active" : "pending" },
+      ];
+    } else {
+      return [
+        { title: "输入连接码", status: step >= 1 ? "completed" : "pending" },
+        { title: "生成响应码", status: step >= 2 ? "completed" : "pending" },
+        { title: "发送给对方", status: step >= 2 ? "active" : "pending" },
+        { title: "等待连接", status: step >= 2 ? "active" : "pending" },
+      ];
+    }
+  };
+
+  const steps = getSteps();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -234,9 +297,43 @@ export function ManualConnectionDialog({
         <DialogHeader>
           <DialogTitle>手动连接设备</DialogTitle>
           <DialogDescription>
-            通过扫描二维码或复制连接码来连接设备（无需服务器）
+            {connectionStatus || "通过扫描二维码或复制连接码来连接设备（无需服务器）"}
           </DialogDescription>
         </DialogHeader>
+
+        {/* 步骤指示器 */}
+        <div className="flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+          {steps.map((s, index) => (
+            <div key={index} className="flex items-center flex-1">
+              <div className="flex flex-col items-center flex-1">
+                {s.status === "completed" ? (
+                  <CircleCheck className="size-5 text-green-600" />
+                ) : s.status === "active" ? (
+                  <div className="relative">
+                    <Circle className="size-5 text-blue-600" />
+                    {isLoading && index === steps.findIndex(step => step.status === "active") && (
+                      <Loader2 className="absolute inset-0 size-5 text-blue-600 animate-spin" />
+                    )}
+                  </div>
+                ) : (
+                  <Circle className="size-5 text-gray-400" />
+                )}
+                <span className={`text-xs mt-1 ${
+                  s.status === "completed" ? "text-green-600" :
+                  s.status === "active" ? "text-blue-600 font-medium" :
+                  "text-gray-500"
+                }`}>
+                  {s.title}
+                </span>
+              </div>
+              {index < steps.length - 1 && (
+                <div className={`h-px flex-1 mx-2 ${
+                  s.status === "completed" ? "bg-green-600" : "bg-gray-300"
+                }`} />
+              )}
+            </div>
+          ))}
+        </div>
 
         <Tabs value={activeTab} onValueChange={(v) => {
           setActiveTab(v as "sender" | "receiver");
@@ -281,10 +378,11 @@ export function ManualConnectionDialog({
 
                 <div className="space-y-2">
                   <p className="text-sm font-medium text-center">2. 输入对方的响应码</p>
-                  <Input 
-                    placeholder="粘贴对方的响应码" 
+                  <Input
+                    placeholder="粘贴对方的响应码（点击后自动识别剪贴板）"
                     value={inputCode}
                     onChange={(e) => setInputCode(e.target.value)}
+                    onFocus={handleInputFocus}
                   />
                   <Button onClick={finalizeConnection} disabled={!inputCode || isLoading} className="w-full">
                     {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : "完成连接"}
@@ -301,10 +399,11 @@ export function ManualConnectionDialog({
                 <div className="text-center space-y-2">
                   <p className="text-sm text-gray-500">第一步：输入发起方的连接码</p>
                 </div>
-                <Input 
-                  placeholder="粘贴发起方的连接码" 
+                <Input
+                  placeholder="粘贴发起方的连接码（点击后自动识别剪贴板）"
                   value={inputCode}
                   onChange={(e) => setInputCode(e.target.value)}
+                  onFocus={handleInputFocus}
                 />
                 <Button onClick={handleProcessOffer} disabled={!inputCode || isLoading} className="w-full">
                   {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}

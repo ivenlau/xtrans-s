@@ -44,6 +44,16 @@ export interface HistoryItem {
   text?: string;
 }
 
+// 连接历史项
+export interface ConnectionHistoryItem {
+  deviceId: string;
+  deviceName: string;
+  lastConnected: number;
+  connectionType: 'lan' | 'wan' | 'unknown';
+  connectionCount: number;
+  latency?: number;
+}
+
 // 设置
 export interface Settings {
   deviceName: string;
@@ -63,6 +73,9 @@ interface StoreState {
 
   // 历史记录
   history: HistoryItem[];
+
+  // 连接历史
+  connectionHistory: ConnectionHistoryItem[];
 
   // 设置
   settings: Settings;
@@ -87,6 +100,12 @@ interface StoreState {
   deleteHistory: (id: string) => void;
   clearHistory: () => void;
 
+  // 连接历史操作
+  addConnectionHistory: (device: DeviceInfo, connectionType?: 'lan' | 'wan' | 'unknown', latency?: number) => void;
+  removeConnectionHistory: (deviceId: string) => void;
+  clearConnectionHistory: () => void;
+  quickReconnect: (deviceId: string) => Promise<boolean>;
+
   // 设置操作
   updateSettings: (settings: Partial<Settings>) => void;
 
@@ -97,13 +116,14 @@ interface StoreState {
   getDeviceById: (deviceId: string) => DeviceInfo | undefined;
 }
 
-export const useStore = create<StoreState>((set) => ({
+export const useStore = create<StoreState>((set, get) => ({
   // 初始状态
   myDevice: null,
   devices: [],
   isConnected: false,
   transfers: [],
   history: [],
+  connectionHistory: [],
   settings: {
     deviceName: getDefaultDeviceName(),
     theme: 'system',
@@ -156,6 +176,85 @@ export const useStore = create<StoreState>((set) => ({
       history: state.history.filter((h) => h.id !== id),
     })),
   clearHistory: () => set({ history: [] }),
+
+  // 连接历史操作
+  addConnectionHistory: (device, connectionType = 'unknown', latency?) => {
+    const existing = get().connectionHistory.find(
+      (item) => item.deviceId === device.deviceId
+    );
+
+    if (existing) {
+      // 更新现有记录
+      set({
+        connectionHistory: get().connectionHistory.map((item) =>
+          item.deviceId === device.deviceId
+            ? {
+                ...item,
+                lastConnected: Date.now(),
+                connectionCount: item.connectionCount + 1,
+                connectionType,
+                latency,
+              }
+            : item
+        ),
+      });
+    } else {
+      // 添加新记录
+      const newItem: ConnectionHistoryItem = {
+        deviceId: device.deviceId,
+        deviceName: device.deviceName,
+        lastConnected: Date.now(),
+        connectionType,
+        connectionCount: 1,
+        latency,
+      };
+      set({
+        connectionHistory: [newItem, ...get().connectionHistory],
+      });
+    }
+
+    // 持久化到 localStorage
+    localStorage.setItem(
+      'xtrans-connection-history',
+      JSON.stringify(get().connectionHistory)
+    );
+  },
+  removeConnectionHistory: (deviceId) =>
+    set((state) => {
+      const newHistory = state.connectionHistory.filter(
+        (h) => h.deviceId !== deviceId
+      );
+      // 持久化到 localStorage
+      localStorage.setItem(
+        'xtrans-connection-history',
+        JSON.stringify(newHistory)
+      );
+      return { connectionHistory: newHistory };
+    }),
+  clearConnectionHistory: () => {
+    const empty = [];
+    localStorage.setItem('xtrans-connection-history', JSON.stringify(empty));
+    return { connectionHistory: empty };
+  },
+  quickReconnect: async (deviceId) => {
+    // 从历史记录中查找设备
+    const historyItem = get().connectionHistory.find(
+      (h) => h.deviceId === deviceId
+    );
+
+    if (!historyItem) {
+      return false;
+    }
+
+    // 触发重连事件，由 App 组件监听并处理
+    window.dispatchEvent(
+      new CustomEvent('quick-reconnect', {
+        detail: { deviceId, deviceName: historyItem.deviceName },
+      })
+    );
+
+    return true;
+  },
 
   // 设置操作
   updateSettings: (settings) =>

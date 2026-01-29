@@ -9,10 +9,11 @@ import { HistoryDialog, HistoryItem } from "./components/history-dialog";
 import { SettingsDialog } from "./components/settings-dialog";
 import { ShareDialog } from "./components/share-dialog";
 import { ManualConnectionDialog } from "./components/manual-connection-dialog";
+import { ConnectionHistoryDialog } from "./components/connection-history-dialog";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import { Toaster } from "./components/ui/sonner";
-import { Settings, History, Wifi, Info, Share2, QrCode } from "lucide-react";
+import { Settings, History, Wifi, Info, Share2, QrCode, Clock } from "lucide-react";
 import { toast } from "sonner";
 import { useStore } from "./store/use-store";
 import { HybridConnectionManager, P2PMessage } from "./lib/hybrid-connection-manager";
@@ -43,6 +44,8 @@ function App() {
     settings,
     updateSettings,
     getDeviceById,
+    connectionHistory,
+    addConnectionHistory,
   } = useStore();
 
   const [fileTransferDialog, setFileTransferDialog] = useState<{
@@ -79,9 +82,22 @@ function App() {
   const [settingsDialog, setSettingsDialog] = useState(false);
   const [shareDialog, setShareDialog] = useState(false);
   const [manualConnectionDialog, setManualConnectionDialog] = useState(false);
+  const [connectionHistoryDialog, setConnectionHistoryDialog] = useState(false);
 
   // 初始化P2P发现和连接管理
   useEffect(() => {
+    // 从 localStorage 加载连接历史
+    const savedHistory = localStorage.getItem('xtrans-connection-history');
+    if (savedHistory) {
+      try {
+        const parsed = JSON.parse(savedHistory);
+        // 更新 store 中的连接历史
+        useStore.setState({ connectionHistory: parsed });
+      } catch (error) {
+        console.error('加载连接历史失败:', error);
+      }
+    }
+
     const initP2P = async () => {
       // 初始化连接管理器
       connectionManager = new HybridConnectionManager({
@@ -123,6 +139,10 @@ function App() {
           const device = event.message.data as DeviceInfo;
           console.log("处理握手数据，添加设备:", device);
           addDevice(device);
+
+          // 保存到连接历史
+          addConnectionHistory(device);
+
           toast.success(`已连接到设备: ${device.deviceName}`);
           showNotification('设备已连接', `${device.deviceName} 已上线`, { sound: true });
         } else if (event.type === 'messageReceived' && event.message) {
@@ -425,6 +445,14 @@ function App() {
 
   const onlineDevices = devices.filter((d) => d.online);
 
+  // 处理快速重连
+  const handleQuickReconnect = async (deviceId: string, deviceName: string) => {
+    toast.info(`正在重连到 ${deviceName}...`);
+    // TODO: 实现快速重连逻辑
+    // 这需要保存之前的连接码或重新建立连接
+    console.log('快速重连:', deviceId, deviceName);
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
       <Toaster position="top-center" />
@@ -449,6 +477,10 @@ function App() {
               <Button variant="ghost" size="sm" onClick={() => setShareDialog(true)}>
                 <Share2 className="size-4 mr-2" />
                 分享
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConnectionHistoryDialog(true)}>
+                <Clock className="size-4 mr-2" />
+                连接历史
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setHistoryDialog(true)}>
                 <History className="size-4 mr-2" />
@@ -638,6 +670,12 @@ function App() {
         open={manualConnectionDialog}
         onOpenChange={setManualConnectionDialog}
         connectionManager={connectionManager}
+      />
+
+      <ConnectionHistoryDialog
+        open={connectionHistoryDialog}
+        onOpenChange={setConnectionHistoryDialog}
+        onReconnect={handleQuickReconnect}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { DeviceCard } from "./components/device-card";
-import { showNotification, checkNotificationPermission } from "./lib/notifications";
+import { showNotification } from "./lib/notifications";
 import { FileTransferDialog } from "./components/file-transfer-dialog";
 import { TextTransferDialog } from "./components/text-transfer-dialog";
 import { IncomingFilesDialog } from "./components/incoming-files-dialog";
@@ -8,21 +8,20 @@ import { TextMessageDialog } from "./components/text-message-dialog";
 import { HistoryDialog, HistoryItem } from "./components/history-dialog";
 import { SettingsDialog } from "./components/settings-dialog";
 import { ShareDialog } from "./components/share-dialog";
+import { ManualConnectionDialog } from "./components/manual-connection-dialog";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import { Toaster } from "./components/ui/sonner";
-import { Settings, History, RefreshCw, Wifi, Info, Share2 } from "lucide-react";
+import { Settings, History, Wifi, Info, Share2, QrCode } from "lucide-react";
 import { toast } from "sonner";
 import { useStore } from "./store/use-store";
-import { DeviceManager } from "./lib/device-manager";
+import { HybridConnectionManager, P2PMessage } from "./lib/hybrid-connection-manager";
 import { P2PConnection } from "./lib/webrtc";
 import { DeviceInfo } from "./lib/device-manager";
+import { v4 as uuidv4 } from 'uuid';
 
-// 设备管理器实例
-let deviceManager: DeviceManager | null = null;
-// P2P 连接映射
+let connectionManager: HybridConnectionManager | null = null;
 const p2pConnections = new Map<string, P2PConnection>();
-// 文件元数据缓存（用于接收文件）
 const fileMetadataCache = new Map<string, any>();
 
 function App() {
@@ -56,7 +55,6 @@ function App() {
     device: DeviceInfo | null;
   }>({ open: false, device: null });
 
-  // 接收文件列表
   const [incomingFiles, setIncomingFiles] = useState<Map<string, {
     fileName: string;
     fileSize: number;
@@ -67,7 +65,6 @@ function App() {
   }>>(new Map());
   const [incomingFilesDialogOpen, setIncomingFilesDialogOpen] = useState(false);
 
-  // 接收到的文字消息
   const [receivedTextMessage, setReceivedTextMessage] = useState<{
     open: boolean;
     senderName: string;
@@ -81,302 +78,152 @@ function App() {
   const [historyDialog, setHistoryDialog] = useState(false);
   const [settingsDialog, setSettingsDialog] = useState(false);
   const [shareDialog, setShareDialog] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [manualConnectionDialog, setManualConnectionDialog] = useState(false);
 
-  // 初始化设备管理器
+  // 初始化P2P发现和连接管理
   useEffect(() => {
-    const initDeviceManager = async () => {
-      // 请求通知权限
-      await checkNotificationPermission();
+    const initP2P = async () => {
+      // 初始化连接管理器
+      connectionManager = new HybridConnectionManager({
+        preferredType: 'webrtc',
+        fallbackTypes: ['websocket'],
+        timeout: 10000,
+        retryAttempts: 3,
+      });
 
-      // 动态生成WebSocket URL：从当前页面地址提取主机名（IP或域名）
-      let websocketUrl = import.meta.env.VITE_WEBSOCKET_URL;
-
-      if (!websocketUrl) {
-        const hostname = window.location.hostname;
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        websocketUrl = `${protocol}//${hostname}:3002`;
+      // 确保本地设备信息存在
+      let deviceId = localStorage.getItem('xtrans-device-id');
+      if (!deviceId) {
+        deviceId = uuidv4();
+        localStorage.setItem('xtrans-device-id', deviceId);
       }
 
-      deviceManager = new DeviceManager(websocketUrl);
+      const deviceName = localStorage.getItem('xtrans-device-name') || settings.deviceName || 'Unknown Device';
 
-      // 连接到服务器
-      try {
-        const deviceId = await deviceManager.connect(settings.deviceName);
-        setIsConnected(true);
-      } catch (error) {
-        console.error('WebSocket连接失败:', error);
-        toast.error("连接服务器失败");
-        setIsConnected(false);
-      }
+      const currentDevice: DeviceInfo = {
+        deviceId,
+        deviceName,
+        deviceType: 'desktop', // 简单起见，或者使用检测逻辑
+        platform: 'web',
+        browser: 'chrome',
+        ipAddress: '',
+        online: true,
+        lastSeen: Date.now(),
+      };
 
-      // 监听设备事件
-      deviceManager.on((event) => {
-        switch (event.type) {
-          case "devices_updated":
-            setDevices(event.devices);
-            break;
-          case "device_joined":
-            addDevice(event.device);
-            toast.success(`设备 ${event.device.deviceName} 已上线`);
-            // 播放声音和显示桌面通知
-            showNotification(
-              '设备上线',
-              `${event.device.deviceName} 已上线`,
-              { sound: true, desktop: true }
-            );
-            break;
-          case "device_left":
-            removeDevice(event.deviceId);
-            toast.info(`设备已离线`);
-            break;
-          case "device_name_updated":
-            // 更新设备列表中的设备名称
-            setDevices((prevDevices) =>
-              prevDevices.map((device) =>
-                device.deviceId === event.deviceId
-                  ? { ...device, deviceName: event.deviceName }
-                  : device
-              )
-            );
-            toast.info(`设备名称已更新`);
-            break;
-          case "offer":
-            handleWebRTCOffer(event);
-            break;
-          case "answer":
-            handleWebRTCAnswer(event);
-            break;
-          case "ice_candidate":
-            handleICECandidate(event);
-            break;
-          case "transfer_request":
-            handleTransferRequest(event);
-            break;
-          // text_message 现在通过 WebRTC P2P 传输，不再通过 WebSocket
-          // case "text_message":
-          //   handleTextMessage(event);
-          //   break;
+      // 更新 Store 和 ConnectionManager
+      setMyDevice(currentDevice);
+      connectionManager.setLocalDeviceInfo(currentDevice);
+      console.log("初始化完成，本地设备信息已设置:", currentDevice);
+
+      // 监听连接管理器事件
+      connectionManager.addEventListener((event) => {
+        console.log("App收到事件:", event.type, event);
+        if (event.type === 'handshakeReceived' && event.message?.data) {
+          const device = event.message.data as DeviceInfo;
+          console.log("处理握手数据，添加设备:", device);
+          addDevice(device);
+          toast.success(`已连接到设备: ${device.deviceName}`);
+          showNotification('设备已连接', `${device.deviceName} 已上线`, { sound: true });
+        } else if (event.type === 'messageReceived' && event.message) {
+          const { type, data } = event.message;
+          const senderId = event.deviceId;
+          const senderDevice = getDeviceById(senderId);
+          const senderName = senderDevice?.deviceName || '未知设备';
+
+          if (type === 'text') {
+            // 处理文本消息
+            const textContent = data.content || (typeof data === 'string' ? data : JSON.stringify(data));
+            setReceivedTextMessage({
+              open: true,
+              senderName,
+              message: textContent,
+            });
+            showNotification('收到新消息', `${senderName}: ${textContent}`, { sound: true });
+
+            // 添加到历史记录
+            addHistory({
+              id: Date.now().toString(),
+              type: "text",
+              timestamp: Date.now(),
+              deviceName: senderName,
+              direction: "received",
+              text: textContent,
+            });
+          } else if (type === 'file') {
+            // data 是原始的 DataMessage
+            const msg = data as any;
+            if (msg.type === 'metadata') {
+               // 收到文件传输请求
+               const fileId = msg.fileId;
+               const fileName = msg.name;
+               const fileSize = msg.size;
+
+               // 更新 incomingFiles 状态，显示接收弹窗
+               setIncomingFiles((prev) => {
+                 const newMap = new Map(prev);
+                 newMap.set(fileId, {
+                   fileName,
+                   fileSize,
+                   senderName,
+                   remoteDeviceId: senderId,
+                   status: 'pending',
+                   progress: 0
+                 });
+                 return newMap;
+               });
+               setIncomingFilesDialogOpen(true);
+               showNotification('收到文件请求', `${senderName} 想要发送文件: ${fileName}`, { sound: true });
+
+               // 缓存元数据，以便后续接收使用
+               fileMetadataCache.set(fileId, msg);
+            }
+          }
         }
       });
 
-      // 获取我的设备信息
-      const myDevice = deviceManager.getMyDevice();
-      if (myDevice) {
-        setMyDevice(myDevice);
-      }
-      setIsConnected(deviceManager.isConnected());
-
-      return () => {
-        deviceManager?.disconnect();
-        deviceManager = null;
-      };
+      setIsConnected(true);
     };
 
-    initDeviceManager();
+    initP2P();
+
+    return () => {
+      connectionManager = null;
+    };
   }, []);
 
-  // 监听设置变化
+  // 监听主题变化
   useEffect(() => {
-    if (settings.deviceName && myDevice) {
-      // 更新设备名称
-      myDevice.deviceName = settings.deviceName;
-      setMyDevice({ ...myDevice });
-    }
-  }, [settings.deviceName]);
+    const root = window.document.documentElement;
+    root.classList.remove("light", "dark");
 
-  // 同步声音和通知设置到 localStorage
-  useEffect(() => {
-    // 初始化时设置默认值
-    if (!localStorage.getItem('soundEnabled')) {
-      localStorage.setItem('soundEnabled', String(settings.soundEnabled));
-    }
-    if (!localStorage.getItem('notificationsEnabled')) {
-      localStorage.setItem('notificationsEnabled', String(settings.notificationsEnabled));
-    }
-  }, []);
-
-  // 监听设置变化并同步到 localStorage
-  useEffect(() => {
-    localStorage.setItem('soundEnabled', String(settings.soundEnabled));
-    localStorage.setItem('notificationsEnabled', String(settings.notificationsEnabled));
-  }, [settings.soundEnabled, settings.notificationsEnabled]);
-
-  // 应用主题
-  useEffect(() => {
-    const root = document.documentElement;
-    if (settings.theme === "dark") {
-      root.classList.add("dark");
-    } else if (settings.theme === "light") {
-      root.classList.remove("dark");
+    if (settings.theme === "system") {
+      const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+      root.classList.add(systemTheme);
     } else {
-      const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      if (isDark) {
-        root.classList.add("dark");
-      } else {
-        root.classList.remove("dark");
-      }
+      root.classList.add(settings.theme);
     }
   }, [settings.theme]);
 
-  // WebRTC Offer 处理
-  const handleWebRTCOffer = async (event: any) => {
-    const connection = new P2PConnection(
-      myDevice?.deviceId || "",
-      event.from,
-      false
-    );
+  // 监听设置变化，更新连接管理器的设备信息
+  useEffect(() => {
+    if (connectionManager && myDevice) {
+      const updatedDevice = {
+        ...myDevice,
+        deviceName: settings.deviceName
+      };
+      connectionManager.setLocalDeviceInfo(updatedDevice);
 
-    // 设置事件监听
-    setupP2PConnection(connection, event.from);
-
-    // 设置远程描述并创建 Answer
-    await connection.setRemoteDescription(event.sdp);
-    const answer = await connection.createAnswer();
-
-    // 发送 Answer
-    deviceManager?.sendSignaling("answer", event.from, answer);
-
-    p2pConnections.set(event.from, connection);
-  };
-
-  // WebRTC Answer 处理
-  const handleWebRTCAnswer = async (event: any) => {
-    const connection = p2pConnections.get(event.from);
-    if (connection) {
-      await connection.setRemoteDescription(event.sdp);
-    }
-  };
-
-  // ICE Candidate 处理
-  const handleICECandidate = async (event: any) => {
-    const connection = p2pConnections.get(event.from);
-    if (connection) {
-      await connection.addIceCandidate(event.candidate);
-    }
-  };
-
-  // 设置 P2P 连接事件
-  const setupP2PConnection = (connection: P2PConnection, remoteDeviceId: string) => {
-    connection.onIceCandidate((candidate) => {
-      deviceManager?.sendSignaling("ice_candidate", remoteDeviceId, candidate);
-    });
-
-    // 监听消息
-    connection.onMessage((message) => {
-      if (message.type === 'metadata') {
-        // 保存到缓存
-        fileMetadataCache.set(message.fileId, message);
-
-        // 收到文件元数据，添加到接收列表
-        const fromDevice = getDeviceById(remoteDeviceId);
-        if (fromDevice) {
-
-          // 播放声音和显示桌面通知
-          showNotification(
-            '收到文件',
-            `${fromDevice.deviceName} 想要发送文件 "${message.name}" (${Math.round(message.size / 1024)}KB)`,
-            { sound: true, desktop: true }
-          );
-
-          setIncomingFiles((prev) => {
-            const newMap = new Map(prev);
-            newMap.set(message.fileId, {
-              fileName: message.name,
-              fileSize: message.size,
-              senderName: fromDevice.deviceName,
-              remoteDeviceId: remoteDeviceId,
-              status: 'pending',
-              progress: 0,
-            });
-            // 自动打开对话框
-            setIncomingFilesDialogOpen(true);
-            return newMap;
-          });
-
-          // 不再显示 toast，因为已经有弹窗列表了
-        } else {
-          // Device not found
-        }
-      } else if (message.type === 'file_cancel') {
-        // 发送方超时取消了文件传输，从接收列表删除
-        setIncomingFiles((prev) => {
-          const newMap = new Map(prev);
-          newMap.delete(message.fileId);
-          // 如果列表为空，关闭对话框
-          if (newMap.size === 0) {
-            setIncomingFilesDialogOpen(false);
-          }
-          return newMap;
-        });
-        // 清理缓存
-        fileMetadataCache.delete(message.fileId);
-      } else if (message.type === 'text') {
-        // 处理通过 WebRTC 接收的文字消息
-        const fromDevice = getDeviceById(remoteDeviceId);
-        if (fromDevice) {
-          // 播放声音和显示桌面通知
-          showNotification(
-            `收到 ${fromDevice.deviceName} 的消息`,
-            message.content.substring(0, 100) + (message.content.length > 100 ? '...' : ''),
-            { sound: true, desktop: true }
-          );
-
-          // 显示文字消息对话框
-          setReceivedTextMessage({
-            open: true,
-            senderName: fromDevice.deviceName,
-            message: message.content,
-          });
-
-          // 添加到历史记录
-          const newItem: HistoryItem = {
-            id: Date.now().toString(),
-            type: "text",
-            timestamp: Date.now(),
-            deviceName: fromDevice.deviceName,
-            direction: "received",
-            text: message.content,
-          };
-          addHistory(newItem);
-        }
+      // 同时更新 myDevice 以保持一致
+      if (myDevice.deviceName !== settings.deviceName) {
+        setMyDevice(updatedDevice);
+        // 广播更新给所有已连接的设备
+        connectionManager.broadcastDeviceInfoUpdate();
       }
-    });
-  };
-
-  // 传输请求处理（现在不需要了，直接通过 P2P 接收）
-  const handleTransferRequest = (event: any) => {
-    // 不再需要这个处理，因为现在直接通过 P2P data channel 接收文件
-  };
-
-  // 文字消息处理 - 已废弃，现在通过 WebRTC P2P 传输
-  // const handleTextMessage = (event: any) => {
-  //   const message = event.message;
-  //   const fromDevice = getDeviceById(event.from);
-  //   if (fromDevice) {
-  //     showNotification(
-  //       `收到 ${fromDevice.deviceName} 的消息`,
-  //       message.content.substring(0, 100) + (message.content.length > 100 ? '...' : ''),
-  //       { sound: true, desktop: true }
-  //     );
-  //     setReceivedTextMessage({
-  //       open: true,
-  //       senderName: fromDevice.deviceName,
-  //       message: message.content || message,
-  //     });
-  //   }
-  // };
-
-  // 刷新设备列表
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    deviceManager?.refreshDevices();
-    toast.info("正在刷新设备列表...");
-    setTimeout(() => {
-      setIsRefreshing(false);
-      toast.success("设备列表已更新");
-    }, 1000);
-  };
+    }
+  }, [settings.deviceName, myDevice]);
 
   // 发送文件
   const handleSendFile = (device: DeviceInfo) => {
@@ -401,121 +248,67 @@ function App() {
     addHistory(newItem);
   };
 
-  // 监听文件传输事件
+  // 文件传输处理
   useEffect(() => {
     const handleTransferFiles = async (e: CustomEvent) => {
       const { targetDevice, files, onProgress } = e.detail;
 
-      // 创建 P2P 连接
-      const connection = new P2PConnection(
-        myDevice?.deviceId || "",
-        targetDevice.deviceId,
-        true
-      );
+      // 尝试建立连接
+      const connected = await connectionManager?.connectToDevice(targetDevice.deviceId, targetDevice);
+      if (!connected) {
+        toast.error("无法连接到设备");
+        return;
+      }
 
-      setupP2PConnection(connection, targetDevice.deviceId);
-      p2pConnections.set(targetDevice.deviceId, connection);
-
-      // 等待连接建立
-      connection.onStatus((status) => {
-        if (status === "connected") {
-          // 开始传输文件
-          files.forEach(async (file: File) => {
-            try {
-              toast.info(`正在等待 ${targetDevice.deviceName} 接收文件...`);
-
-              await connection.sendFile(file, (transferred, total, speed) => {
-                const progress = (transferred / total) * 100;
-                onProgress(progress);
-              });
-
-              toast.success(`文件 ${file.name} 发送成功`);
-
-              // 播放声音提示传输完成
-              showNotification(
-                '文件发送成功',
-                `文件 ${file.name} 已成功发送到 ${targetDevice.deviceName}`,
-                { sound: true, desktop: false }
-              );
-
-              // 添加到历史
-              addHistory({
-                id: Date.now().toString(),
-                type: "file",
-                timestamp: Date.now(),
-                deviceName: targetDevice.deviceName,
-                direction: "sent",
-                fileName: file.name,
-                fileSize: file.size,
-              });
-            } catch (error) {
-              toast.error(`文件传输失败: ${error instanceof Error ? error.message : '未知错误'}`);
-            }
+      // 传输文件
+      for (const file of files) {
+        try {
+          const fileId = await connectionManager?.sendMessage(targetDevice.deviceId, {
+            type: 'file',
+            data: file,
+            timestamp: Date.now(),
+            id: Math.random().toString(36).substring(7),
           });
-        }
-      });
 
-      // 创建 Offer
-      try {
-        const offer = await connection.createOffer();
-        deviceManager?.sendSignaling("offer", targetDevice.deviceId, offer);
-      } catch (error) {
-        // Failed to create offer
+          if (fileId) {
+            toast.success(`文件 ${file.name} 发送成功`);
+            showNotification('文件发送成功', `文件 ${file.name} 已发送到 ${targetDevice.deviceName}`, { sound: true });
+
+            addHistory({
+              id: Date.now().toString(),
+              type: "file",
+              timestamp: Date.now(),
+              deviceName: targetDevice.deviceName,
+              direction: "sent",
+              fileName: file.name,
+              fileSize: file.size,
+            });
+          }
+        } catch (error) {
+          toast.error(`文件传输失败: ${error instanceof Error ? error.message : '未知错误'}`);
+        }
       }
     };
 
     const handleTransferText = async (e: CustomEvent) => {
       const { targetDevice, text } = e.detail;
 
-      // 检查是否已存在 P2P 连接
-      let connection = p2pConnections.get(targetDevice.deviceId);
-
-      // 如果不存在连接，创建新的 P2P 连接
-      if (!connection) {
-        connection = new P2PConnection(
-          myDevice?.deviceId || "",
-          targetDevice.deviceId,
-          true
-        );
-
-        setupP2PConnection(connection, targetDevice.deviceId);
-        p2pConnections.set(targetDevice.deviceId, connection);
-
-        // 创建 Offer 并发送
-        try {
-          const offer = await connection.createOffer();
-          deviceManager?.sendSignaling("offer", targetDevice.deviceId, offer);
-        } catch (error) {
-          toast.error("创建连接失败");
-          return;
-        }
+      const connected = await connectionManager?.connectToDevice(targetDevice.deviceId, targetDevice);
+      if (!connected) {
+        toast.error("无法连接到设备");
+        return;
       }
 
-      // 如果连接已经建立，直接发送
-      if (connection.isReady()) {
-        try {
-          connection.sendText(text);
-          toast.success("文字发送成功");
-        } catch (error) {
-          toast.error(`文字发送失败: ${error instanceof Error ? error.message : '未知错误'}`);
-        }
-      } else {
-        // 连接未建立，等待连接建立后发送
-        const statusCallback = (status: 'connecting' | 'connected' | 'transferring' | 'completed' | 'failed') => {
-          if (status === "connected") {
-            try {
-              connection.sendText(text);
-              toast.success("文字发送成功");
-            } catch (error) {
-              toast.error(`文字发送失败: ${error instanceof Error ? error.message : '未知错误'}`);
-            }
-          } else if (status === "failed") {
-            toast.error("连接失败，请重试");
-          }
-        };
-
-        // 一次性监听状态变化
-        connection.onStatus(statusCallback);
+      try {
+        await connectionManager?.sendMessage(targetDevice.deviceId, {
+          type: 'text',
+          data: text,
+          timestamp: Date.now(),
+          id: Math.random().toString(36).substring(7),
+        });
+        toast.success("文字发送成功");
+      } catch (error) {
+        toast.error(`文字发送失败: ${error instanceof Error ? error.message : '未知错误'}`);
       }
     };
 
@@ -531,53 +324,36 @@ function App() {
   // 接受文件
   const handleAcceptFile = async (fileId: string) => {
     const file = incomingFiles.get(fileId);
-    if (!file) {
-      // File not found
-      return;
-    }
-
-    const connection = p2pConnections.get(file.remoteDeviceId);
-    if (!connection) {
-      toast.error("接收文件失败：连接不存在");
-      return;
-    }
-    // 发送接受消息
-    connection.sendMessage({
-      type: 'file_accept',
-      fileId: fileId,
-    });
-    // 更新状态为正在接收
-    setIncomingFiles((prev) => {
-      const newMap = new Map(prev);
-      const existing = newMap.get(fileId);
-      if (existing) {
-        newMap.set(fileId, { ...existing, status: 'receiving' });
-      }
-      return newMap;
-    });
+    if (!file) return;
 
     try {
-      // 从缓存获取 metadata（如果有的话）
-      const cachedMetadata = fileMetadataCache.get(fileId);
-      const { file: receivedFile } = await connection.receiveFile(
+      // 更新状态为接收中
+      setIncomingFiles((prev) => {
+        const newMap = new Map(prev);
+        newMap.set(fileId, { ...file, status: 'receiving', progress: 0 });
+        return newMap;
+      });
+
+      const metadata = fileMetadataCache.get(fileId);
+
+      if (!connectionManager) throw new Error("Connection manager not initialized");
+
+      const receivedFile = await connectionManager.receiveFile(
+        file.remoteDeviceId,
         fileId,
-        (transferred, total, speed) => {
-          // 更新进度
-          const progress = Math.round((transferred / total) * 100);
+        metadata,
+        (progress) => {
           setIncomingFiles((prev) => {
             const newMap = new Map(prev);
-            const existing = newMap.get(fileId);
-            if (existing) {
-              newMap.set(fileId, { ...existing, progress });
+            const current = newMap.get(fileId);
+            if (current) {
+              newMap.set(fileId, { ...current, progress });
             }
             return newMap;
           });
-        },
-        cachedMetadata // 传入缓存的 metadata
+        }
       );
 
-      // File received, starting download
-      // 下载文件
       const url = URL.createObjectURL(receivedFile);
       const a = document.createElement('a');
       a.href = url;
@@ -586,18 +362,10 @@ function App() {
       URL.revokeObjectURL(url);
 
       toast.success(`文件 ${receivedFile.name} 接收成功`);
+      showNotification('文件接收成功', `文件 ${receivedFile.name} 已接收`, { sound: true });
 
-      // 播放声音提示接收完成
-      showNotification(
-        '文件接收成功',
-        `文件 ${receivedFile.name} 已成功接收`,
-        { sound: true, desktop: false }
-      );
-
-      // 清理缓存
       fileMetadataCache.delete(fileId);
 
-      // 添加到历史
       const newItem: HistoryItem = {
         id: Date.now().toString(),
         type: "file",
@@ -609,16 +377,13 @@ function App() {
       };
       addHistory(newItem);
 
-      // 更新状态为完成
       setIncomingFiles((prev) => {
         const newMap = new Map(prev);
         newMap.set(fileId, { ...file, status: 'completed', progress: 100 });
-        // 3秒后从列表移除
         setTimeout(() => {
           setIncomingFiles((prev) => {
             const newMap = new Map(prev);
             newMap.delete(fileId);
-            // 如果列表为空，关闭对话框
             if (newMap.size === 0) {
               setIncomingFilesDialogOpen(false);
             }
@@ -628,15 +393,9 @@ function App() {
         return newMap;
       });
     } catch (error) {
-      toast.error("接收文件失败");
+      console.error(error);
+      toast.error(`接收文件失败: ${error instanceof Error ? error.message : '未知错误'}`);
       fileMetadataCache.delete(fileId);
-
-      // 更新状态为失败
-      setIncomingFiles((prev) => {
-        const newMap = new Map(prev);
-        newMap.delete(fileId);
-        return newMap;
-      });
     }
   };
 
@@ -644,24 +403,19 @@ function App() {
   const handleRejectFile = (fileId: string) => {
     const file = incomingFiles.get(fileId);
     if (file && file.remoteDeviceId) {
-      const connection = p2pConnections.get(file.remoteDeviceId);
-      if (connection) {
-        // 发送拒绝消息
-        connection.sendMessage({
-          type: 'file_reject',
-          fileId: fileId,
-        });
-      }
+      connectionManager?.sendMessage(file.remoteDeviceId, {
+        type: 'file',
+        data: { action: 'reject', fileId },
+        timestamp: Date.now(),
+        id: Math.random().toString(36).substring(7),
+      });
 
-      // 清理缓存
       fileMetadataCache.delete(fileId);
     }
 
-    // 从列表移除（不显示 toast，因为文件已经从列表消失）
     setIncomingFiles((prev) => {
       const newMap = new Map(prev);
       newMap.delete(fileId);
-      // 如果列表为空，关闭对话框
       if (newMap.size === 0) {
         setIncomingFilesDialogOpen(false);
       }
@@ -675,7 +429,6 @@ function App() {
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
       <Toaster position="top-center" />
 
-      {/* Header */}
       <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -688,7 +441,7 @@ function App() {
                   XTrans
                 </h1>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  局域网文件传输
+                  无服务器P2P传输
                 </p>
               </div>
             </div>
@@ -710,9 +463,7 @@ function App() {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Status Bar */}
         <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-800 p-6 mb-6">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-6">
@@ -725,9 +476,9 @@ function App() {
                 </p>
                 <p className="text-xs text-gray-500">
                   {isConnected ? (
-                    <span className="text-green-600">已连接</span>
+                    <span className="text-green-600">已就绪</span>
                   ) : (
-                    <span className="text-red-600">未连接</span>
+                    <span className="text-red-600">未就绪</span>
                   )}
                 </p>
               </div>
@@ -743,26 +494,24 @@ function App() {
                 </div>
               </div>
             </div>
-            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={isRefreshing}>
-              <RefreshCw className={`size-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
-              刷新设备
+            <Button variant="outline" size="sm" onClick={() => setManualConnectionDialog(true)}>
+              <QrCode className="size-4 mr-2" />
+              连接设备
             </Button>
           </div>
         </div>
 
-        {/* Info Banner */}
         <div className="bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-900 rounded-lg p-4 mb-6">
           <div className="flex items-start gap-3">
             <Info className="size-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
               <p className="text-sm text-blue-900 dark:text-blue-100">
-                确保所有设备连接到同一局域网。数据传输完全在本地进行，不经过任何第三方服务器。
+                无服务器P2P模式。点击"连接设备"通过二维码或连接码与局域网或互联网上的设备建立直连。
               </p>
             </div>
           </div>
         </div>
 
-        {/* My Device */}
         <div className="mb-8">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             我的设备
@@ -774,7 +523,6 @@ function App() {
           </div>
         </div>
 
-        {/* Online Devices */}
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             可用设备
@@ -783,10 +531,10 @@ function App() {
             <div className="text-center py-12 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
               <Wifi className="size-12 text-gray-400 mx-auto mb-4" />
               <p className="text-gray-600 dark:text-gray-400 mb-2">
-                未发现其他设备
+                未连接其他设备
               </p>
               <p className="text-sm text-gray-500 dark:text-gray-500">
-                请确保其他设备已连接到同一局域网并打开 XTrans
+                点击"连接设备"按钮开始连接
               </p>
             </div>
           ) : (
@@ -804,7 +552,6 @@ function App() {
         </div>
       </main>
 
-      {/* Dialogs */}
       <FileTransferDialog
         open={fileTransferDialog.open}
         onOpenChange={(open) =>
@@ -833,7 +580,6 @@ function App() {
       <TextMessageDialog
         open={receivedTextMessage.open}
         onOpenChange={(open) => {
-          // 关闭对话框时添加到历史记录
           if (!open) {
             setReceivedTextMessage((prev) => {
               if (prev.senderName && prev.message) {
@@ -855,9 +601,7 @@ function App() {
         }}
         senderName={receivedTextMessage.senderName}
         message={receivedTextMessage.message}
-        onCopy={() => {
-          // 复制已由对话框处理
-        }}
+        onCopy={() => {}}
       />
 
       <HistoryDialog
@@ -872,12 +616,8 @@ function App() {
         onOpenChange={setSettingsDialog}
         deviceName={settings.deviceName}
         onDeviceNameChange={(name) => {
-          // 更新本地设置
           updateSettings({ deviceName: name });
-          // 同步设备名称到服务器和其他设备
-          if (deviceManager) {
-            deviceManager.updateDeviceName(name);
-          }
+          localStorage.setItem('xtrans-device-name', name);
         }}
         theme={settings.theme}
         onThemeChange={(theme) => updateSettings({ theme })}
@@ -892,6 +632,12 @@ function App() {
       <ShareDialog
         open={shareDialog}
         onOpenChange={setShareDialog}
+      />
+
+      <ManualConnectionDialog
+        open={manualConnectionDialog}
+        onOpenChange={setManualConnectionDialog}
+        connectionManager={connectionManager}
       />
     </div>
   );
